@@ -2,6 +2,7 @@ using UnityEngine;
 using TMPro;
 using UnityEngine.UI;
 using System.Collections;
+using System.Collections.Generic;
 
 public enum MathOperator { Addition, Subtraction, Multiplication, Division }
 public enum Difficulty { Beginner, Intermediate, Difficult }
@@ -22,11 +23,20 @@ public class MathGameManager : MonoBehaviour
     public Button checkAnswerButton;
     public Button nextQuestionButton;
     public Button backToMenuButton;
+    public Button endGameButton;
 
     [Header("Score UI")]
     public TextMeshProUGUI scoreText;
     public TextMeshProUGUI streakText;
     public TextMeshProUGUI feedbackText;
+
+    [Header("Leaderboard UI")]
+    public GameObject leaderboardPanel; // panel that shows leaderboard and name entry
+    public TextMeshProUGUI leaderboardText; // area that lists top 10
+    public TMP_InputField nameEntryInput; // input for entering player's name when they qualify
+    public Button submitNameButton;
+    public Button continueButton;
+    public Button exitGameButton;
 
     [Header("Streak Animation")]
     public GameObject streakMessageObj;
@@ -41,6 +51,10 @@ public class MathGameManager : MonoBehaviour
     private int correctAnswers = 0;
     private int incorrectAnswers = 0;
     private int currentStreak = 0;
+    private int pendingStreak = 0;
+    private bool awaitingNameEntry = false;
+
+    private const string LeaderboardPrefsKey = "LeaderboardData";
 
     private void Start()
     {
@@ -49,6 +63,17 @@ public class MathGameManager : MonoBehaviour
         checkAnswerButton.onClick.AddListener(CheckAnswer);
         nextQuestionButton.onClick.AddListener(NextQuestion);
         backToMenuButton.onClick.AddListener(ShowMenu);
+        if (endGameButton != null)
+            endGameButton.onClick.AddListener(EndGame);
+        if (submitNameButton != null)
+            submitNameButton.onClick.AddListener(SubmitNameFromButton);
+        if (continueButton != null)
+            continueButton.onClick.AddListener(ContinueFromLeaderboard);
+        if (exitGameButton != null)
+            exitGameButton.onClick.AddListener(QuitGame);
+
+        // Runtime listeners are wired here for manual UI wiring.
+        // If buttons are assigned, Submit/Continue/Exit will work.
 
         operatorDropdown.onValueChanged.AddListener(OnOperatorChanged);
         difficultyDropdown.onValueChanged.AddListener(OnDifficultyChanged);
@@ -78,12 +103,18 @@ public class MathGameManager : MonoBehaviour
         gamePanel.SetActive(false);
         startButton.gameObject.SetActive(true);
         streakMessageObj.SetActive(false);
+        HideLeaderboardPanel();
         isGameActive = false;
+        awaitingNameEntry = false;
+        pendingStreak = 0;
     }
 
     public void StartGame()
     {
         RefreshSettingsFromDropdowns();
+        HideLeaderboardPanel();
+        awaitingNameEntry = false;
+        pendingStreak = 0;
 
         correctAnswers = 0;
         incorrectAnswers = 0;
@@ -180,6 +211,15 @@ public class MathGameManager : MonoBehaviour
         num1 = Random.Range(min1, max1 + 1);
         num2 = Random.Range(min2, max2 + 1);
 
+        // For Intermediate difficulty, randomly swap operands so either
+        // the first or second number can be the single-digit value.
+        if (currentDiff == Difficulty.Intermediate && Random.value < 0.5f)
+        {
+            int temp = num1;
+            num1 = num2;
+            num2 = temp;
+        }
+
         string opSymbol = "+";
 
         switch (currentOp)
@@ -211,10 +251,174 @@ public class MathGameManager : MonoBehaviour
                 break;
         }
 
-        questionText.text = $"{num1} {opSymbol} {num2} = ";
+        questionText.text = $"{num1} {opSymbol} {num2} =";
 
         StartCoroutine(FocusInputField());
     }
+
+    #region Leaderboard
+
+    [System.Serializable]
+    private class LeaderboardEntry
+    {
+        public string name;
+        public int streak;
+    }
+
+    [System.Serializable]
+    private class LeaderboardData
+    {
+        public LeaderboardEntry[] entries;
+    }
+
+    private List<LeaderboardEntry> LoadLeaderboard()
+    {
+        var list = new List<LeaderboardEntry>();
+        string json = PlayerPrefs.GetString(LeaderboardPrefsKey, "");
+        if (string.IsNullOrEmpty(json)) return list;
+
+        try
+        {
+            LeaderboardData data = JsonUtility.FromJson<LeaderboardData>(json);
+            if (data != null && data.entries != null)
+                list.AddRange(data.entries);
+        }
+        catch { }
+
+        return list;
+    }
+
+    private void SaveLeaderboard(List<LeaderboardEntry> list)
+    {
+        var data = new LeaderboardData();
+        data.entries = list.ToArray();
+        string json = JsonUtility.ToJson(data);
+        PlayerPrefs.SetString(LeaderboardPrefsKey, json);
+        PlayerPrefs.Save();
+    }
+
+    private bool QualifiesForLeaderboard(int streak)
+    {
+        var list = LoadLeaderboard();
+        if (list.Count < 10) return true;
+        int min = int.MaxValue;
+        foreach (var e in list) if (e.streak < min) min = e.streak;
+        return streak > min;
+    }
+
+    private void AddToLeaderboard(string name, int streak)
+    {
+        var list = LoadLeaderboard();
+        var entry = new LeaderboardEntry { name = string.IsNullOrEmpty(name) ? "Anonymous" : name, streak = streak };
+        list.Add(entry);
+        list.Sort((a, b) => b.streak.CompareTo(a.streak));
+        if (list.Count > 10) list.RemoveRange(10, list.Count - 10);
+        SaveLeaderboard(list);
+        UpdateLeaderboardUI(list);
+    }
+
+    private void UpdateLeaderboardUI(List<LeaderboardEntry> list = null)
+    {
+        if (leaderboardText == null) return;
+        if (list == null) list = LoadLeaderboard();
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        for (int i = 0; i < list.Count; i++)
+        {
+            var e = list[i];
+            sb.AppendLine($"{i + 1}. {e.name} - {e.streak}");
+        }
+        leaderboardText.text = sb.ToString();
+    }
+
+    private void ShowLeaderboardPanel(bool showNameEntry)
+    {
+        if (leaderboardPanel == null) return;
+        UpdateLeaderboardUI();
+        leaderboardPanel.SetActive(true);
+
+        if (nameEntryInput != null)
+        {
+            nameEntryInput.gameObject.SetActive(showNameEntry);
+            if (showNameEntry)
+            {
+                nameEntryInput.text = "";
+                nameEntryInput.Select();
+                nameEntryInput.ActivateInputField();
+            }
+        }
+
+        if (submitNameButton != null)
+            submitNameButton.gameObject.SetActive(showNameEntry);
+
+        if (continueButton != null)
+            continueButton.gameObject.SetActive(!showNameEntry);
+
+        if (exitGameButton != null)
+            exitGameButton.gameObject.SetActive(!showNameEntry);
+    }
+
+    private void HideLeaderboardPanel()
+    {
+        if (leaderboardPanel == null) return;
+        leaderboardPanel.SetActive(false);
+    }
+
+    private void OnSubmitName()
+    {
+        if (!awaitingNameEntry) return;
+        string name = nameEntryInput != null ? nameEntryInput.text : "";
+        AddToLeaderboard(name, pendingStreak);
+        awaitingNameEntry = false;
+        pendingStreak = 0;
+        ShowLeaderboardPanel(false);
+    }
+
+    // Public wrapper methods so buttons can be wired as persistent listeners
+    public void ShowLeaderboard()
+    {
+        ShowLeaderboardPanel(false);
+    }
+
+    public void ShowLeaderboardWithNameEntry()
+    {
+        ShowLeaderboardPanel(true);
+    }
+
+    public void EndGame()
+    {
+        isGameActive = false;
+        if (gamePanel != null)
+            gamePanel.SetActive(false);
+        if (answerInputField != null)
+            answerInputField.interactable = false;
+
+        if (awaitingNameEntry)
+        {
+            ShowLeaderboardPanel(true);
+        }
+        else
+        {
+            ShowLeaderboardPanel(false);
+        }
+    }
+
+    public void SubmitNameFromButton()
+    {
+        OnSubmitName();
+    }
+
+    public void ContinueFromLeaderboard()
+    {
+        HideLeaderboardPanel();
+        ShowMenu();
+    }
+
+    public void ExitGameFromLeaderboard()
+    {
+        QuitGame();
+    }
+
+    #endregion
 
     private IEnumerator FocusInputField()
     {
@@ -239,6 +443,14 @@ public class MathGameManager : MonoBehaviour
                 correctAnswers++;
                 currentStreak++;
                 feedbackText.text = "<color=green>Correct!</color>";
+
+                // If this streak qualifies for the leaderboard, track it and flag for name entry.
+                if (QualifiesForLeaderboard(currentStreak))
+                {
+                    pendingStreak = currentStreak;
+                    if (!awaitingNameEntry)
+                        awaitingNameEntry = true;
+                }
 
                 if (currentStreak >= 3)
                 {
