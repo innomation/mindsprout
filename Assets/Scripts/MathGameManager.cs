@@ -3,12 +3,19 @@ using TMPro;
 using UnityEngine.UI;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 
-public enum MathOperator { Addition, Subtraction, Multiplication, Division }
-public enum Difficulty { Beginner, Intermediate, Difficult }
+public enum MathOperator { Addition, Subtraction, Multiplication, Division, Simple, Advanced }
+public enum Difficulty { Beginner, Intermediate, Difficult, Adaptive }
 
 public class MathGameManager : MonoBehaviour
 {
+    [Header("Stats Profile UI")]
+    public GameObject statsPanel;
+    public TextMeshProUGUI statsText;
+    public Button showStatsButton;
+    public Button closeStatsButton;
+
     [Header("Menu UI")]
     public GameObject menuPanel;
     public TMP_Dropdown operatorDropdown;
@@ -27,13 +34,24 @@ public class MathGameManager : MonoBehaviour
 
     [Header("Score UI")]
     public TextMeshProUGUI scoreText;
+    public TextMeshProUGUI totalPointsText;
     public TextMeshProUGUI streakText;
     public TextMeshProUGUI feedbackText;
 
+    [Header("Game Enhancement UI (Optional)")]
+    public TextMeshProUGUI multiplierText;
+    public TextMeshProUGUI rankText;
+    public TextMeshProUGUI nextMilestoneText;
+    public GameObject sessionSummaryPanel;
+    public TextMeshProUGUI sessionSummaryText;
+    public Button sessionSummaryOkButton;
+    public GameObject achievementNotificationPanel;
+    public TextMeshProUGUI achievementNotificationText;
+
     [Header("Leaderboard UI")]
-    public GameObject leaderboardPanel; // panel that shows leaderboard and name entry
-    public TextMeshProUGUI leaderboardText; // area that lists top 10
-    public TMP_InputField nameEntryInput; // input for entering player's name when they qualify
+    public GameObject leaderboardPanel;
+    public TextMeshProUGUI leaderboardText;
+    public TMP_InputField nameEntryInput;
     public Button submitNameButton;
     public Button continueButton;
     public Button exitGameButton;
@@ -43,116 +61,312 @@ public class MathGameManager : MonoBehaviour
     public TextMeshProUGUI streakMessageText;
     public string[] encouragementMessages = { "On Fire!", "Unstoppable!", "Math Genius!", "Keep It Up!", "Amazing!" };
 
+    #region Serializable Classes
+
+    [System.Serializable]
+    private class Achievement
+    {
+        public string id;
+        public string name;
+        public string description;
+        public bool unlocked;
+        public System.DateTime unlockedDate;
+    }
+
+    [System.Serializable]
+    private class SessionStats
+    {
+        public int correctAnswers;
+        public int incorrectAnswers;
+        public int maxStreak;
+        public float maxComboScore;
+        public float sessionDurationSeconds;
+        public int operatorUsed;
+        public int difficultyUsed;
+        public List<string> achievementsUnlockedThisSession = new List<string>();
+    }
+
+    [System.Serializable]
+    private class PlayerProfile
+    {
+        public List<Achievement> achievements = new List<Achievement>();
+        public SessionStats lastSession;
+        public int totalGamesPlayed;
+        public int totalQuestionsAnswered;
+    }
+
+    [System.Serializable]
+    private class LeaderboardEntry
+    {
+        public string name;
+        public int streak;
+        public float comboScore;
+        public float timeToMilestoneSeconds;
+        public long timestamp;
+    }
+
+    [System.Serializable]
+    private class LeaderboardData
+    {
+        public LeaderboardEntry[] entries;
+    }
+
+    #endregion
+
+    #region Game State
+
     private MathOperator currentOp;
     private Difficulty currentDiff;
+    private Difficulty selectedDiff;
+    private Difficulty currentAdaptiveDiff;
     private bool isGameActive = false;
+    private bool isAdaptiveMode = false;
 
     private int currentAnswer;
     private int correctAnswers = 0;
     private int incorrectAnswers = 0;
     private int currentStreak = 0;
-    private int pendingStreak = 0;
+    private int maxStreakThisSession = 0;
+    private float maxStreakTime = 0f;
     private bool awaitingNameEntry = false;
 
-    private const string LeaderboardPrefsKey = "LeaderboardData";
+    // Time tracking
+    private float gameStartTime = 0f;
+    private float streakStartTime = 0f;
+
+    // Combo multiplier
+    private float currentMultiplier = 1.0f;
+    private float sessionComboScore = 0f;
+    private const float BasePointsPerQuestion = 10f;
+
+    // Leaderboard caching for rank
+    private List<LeaderboardEntry> currentStreakLeaderboard;
+    private List<LeaderboardEntry> currentComboLeaderboard;
+
+    // Adaptive difficulty
+    private int consecutiveCorrect = 0;
+    private int consecutiveIncorrect = 0;
+    private const int AdaptiveThresholdUp = 10;
+    private const int AdaptiveThresholdDown = 5;
+
+    // Player persistence
+    private PlayerProfile playerProfile;
+    private const string PlayerProfilePrefsKey = "PlayerProfile";
+    private List<Achievement> allAchievements;
+
+    #endregion
 
     private void Start()
     {
+        InitializeAchievements();
+        LoadPlayerProfile();
         ShowMenu();
-        startButton.onClick.AddListener(StartGame);
-        checkAnswerButton.onClick.AddListener(CheckAnswer);
-        nextQuestionButton.onClick.AddListener(NextQuestion);
-        backToMenuButton.onClick.AddListener(ShowMenu);
-        if (endGameButton != null)
-            endGameButton.onClick.AddListener(EndGame);
-        if (submitNameButton != null)
-            submitNameButton.onClick.AddListener(SubmitNameFromButton);
-        if (continueButton != null)
-            continueButton.onClick.AddListener(ContinueFromLeaderboard);
-        if (exitGameButton != null)
-            exitGameButton.onClick.AddListener(QuitGame);
 
-        // Runtime listeners are wired here for manual UI wiring.
-        // If buttons are assigned, Submit/Continue/Exit will work.
+        // Button listeners
+        if (showStatsButton != null) showStatsButton.onClick.AddListener(ShowStats);
+        if (closeStatsButton != null) closeStatsButton.onClick.AddListener(CloseStats);
+        if (startButton != null) startButton.onClick.AddListener(StartGame);
+        if (checkAnswerButton != null) checkAnswerButton.onClick.AddListener(CheckAnswer);
+        if (nextQuestionButton != null) nextQuestionButton.onClick.AddListener(NextQuestion);
+        if (backToMenuButton != null) backToMenuButton.onClick.AddListener(ShowMenu);
+        if (endGameButton != null) endGameButton.onClick.AddListener(EndGame);
+        if (submitNameButton != null) submitNameButton.onClick.AddListener(SubmitNameFromButton);
+        if (continueButton != null) continueButton.onClick.AddListener(ContinueFromLeaderboard);
+        if (exitGameButton != null) exitGameButton.onClick.AddListener(QuitGame);
+        if (sessionSummaryOkButton != null) sessionSummaryOkButton.onClick.AddListener(ProceedToLeaderboard);
 
-        operatorDropdown.onValueChanged.AddListener(OnOperatorChanged);
-        difficultyDropdown.onValueChanged.AddListener(OnDifficultyChanged);
-        if (quitButton != null)
-            quitButton.onClick.AddListener(QuitGame);
+        if (operatorDropdown != null) operatorDropdown.onValueChanged.AddListener(OnOperatorChanged);
+        if (difficultyDropdown != null) difficultyDropdown.onValueChanged.AddListener(OnDifficultyChanged);
+        if (quitButton != null) quitButton.onClick.AddListener(QuitGame);
 
-        // Ensure iOS numeric keyboard
-        answerInputField.keyboardType = TouchScreenKeyboardType.NumberPad;
-
-        // Submit answer on enter (or "Done" on iOS keyboard)
-        answerInputField.onSubmit.AddListener(delegate { CheckAnswer(); });
+        if (answerInputField != null)
+        {
+            answerInputField.keyboardType = TouchScreenKeyboardType.NumberPad;
+            answerInputField.onSubmit.AddListener(delegate { CheckAnswer(); });
+        }
     }
 
     private void Update()
     {
-        // If the scene is missing an EventSystem, this loop can spam the Canvas and cause it to turn invisible!
-        if (gamePanel.activeSelf && !answerInputField.isFocused && answerInputField.interactable)
+        if (isGameActive && gamePanel != null && gamePanel.activeSelf && answerInputField != null && !answerInputField.isFocused && answerInputField.interactable)
         {
             answerInputField.Select();
             answerInputField.ActivateInputField();
         }
     }
 
+    #region Initialization & Persistence
+
+    private void InitializeAchievements()
+    {
+        allAchievements = new List<Achievement>
+        {
+            new Achievement { id = "first_3_streak", name = "Beginner", description = "Reach a 3-question streak" },
+            new Achievement { id = "10_streak", name = "Performer", description = "Reach a 10-question streak" },
+            new Achievement { id = "20_streak", name = "Master", description = "Reach a 20-question streak" },
+            new Achievement { id = "50_streak", name = "Legend", description = "Reach a 50-question streak" },
+            new Achievement { id = "lightning_3", name = "Lightning", description = "3-streak in under 15 seconds" },
+            new Achievement { id = "speedrun_3", name = "Speedrun", description = "3-streak in under 10 seconds" },
+            new Achievement { id = "variety", name = "Variety", description = "Reach 5-streak in all 4 operators" },
+            new Achievement { id = "difficult_master", name = "Difficulty Climber", description = "Reach 10-streak on Difficult" },
+            new Achievement { id = "perfect_session", name = "Perfect Session", description = "10 consecutive correct answers" },
+            new Achievement { id = "combo_master", name = "Combo Master", description = "Reach 4x multiplier" }
+        };
+    }
+
+    private void LoadPlayerProfile()
+    {
+        string json = PlayerPrefs.GetString(PlayerProfilePrefsKey, "");
+        if (string.IsNullOrEmpty(json))
+        {
+            playerProfile = new PlayerProfile();
+            playerProfile.achievements = new List<Achievement>(allAchievements);
+            SavePlayerProfile();
+        }
+        else
+        {
+            try
+            {
+                playerProfile = JsonUtility.FromJson<PlayerProfile>(json);
+                if (playerProfile.achievements == null) playerProfile.achievements = new List<Achievement>();
+                
+                foreach (var ach in allAchievements)
+                {
+                    if (!playerProfile.achievements.Any(a => a.id == ach.id))
+                        playerProfile.achievements.Add(ach);
+                }
+            }
+            catch
+            {
+                playerProfile = new PlayerProfile();
+                playerProfile.achievements = new List<Achievement>(allAchievements);
+            }
+        }
+    }
+
+    private void SavePlayerProfile()
+    {
+        string json = JsonUtility.ToJson(playerProfile);
+        PlayerPrefs.SetString(PlayerProfilePrefsKey, json);
+        PlayerPrefs.Save();
+    }
+
+    #endregion
+
+    #region Stats Profile
+
+    public void ShowStats()
+    {
+        if (statsPanel == null || statsText == null) return;
+        statsPanel.SetActive(true);
+        
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        sb.AppendLine("<b>Stats Profile</b>\n");
+        sb.AppendLine($"Total Games Played: {playerProfile.totalGamesPlayed}");
+        sb.AppendLine($"Total Questions Answered: {playerProfile.totalQuestionsAnswered}\n");
+        sb.AppendLine("<b>Unlocked Achievements:</b>");
+        
+        int unlockedCount = 0;
+        foreach (var ach in playerProfile.achievements)
+        {
+            if (ach.unlocked)
+            {
+                sb.AppendLine($"- <b>{ach.name}</b>: {ach.description}");
+                unlockedCount++;
+            }
+        }
+        if (unlockedCount == 0) sb.AppendLine("<i>None yet. Keep playing!</i>");
+
+        statsText.text = sb.ToString();
+    }
+
+    public void CloseStats()
+    {
+        if (statsPanel != null) statsPanel.SetActive(false);
+    }
+
+    #endregion
+
+    #region Menu & Game Flow
+
     public void ShowMenu()
     {
-        menuPanel.SetActive(true);
-        gamePanel.SetActive(false);
-        startButton.gameObject.SetActive(true);
-        streakMessageObj.SetActive(false);
+        if (menuPanel != null) menuPanel.SetActive(true);
+        if (gamePanel != null) gamePanel.SetActive(false);
+        if (sessionSummaryPanel != null) sessionSummaryPanel.SetActive(false);
+        if (statsPanel != null) statsPanel.SetActive(false);
+        if (startButton != null) startButton.gameObject.SetActive(true);
+        if (streakMessageObj != null) streakMessageObj.SetActive(false);
+        
         HideLeaderboardPanel();
         isGameActive = false;
         awaitingNameEntry = false;
-        pendingStreak = 0;
     }
 
     public void StartGame()
     {
         RefreshSettingsFromDropdowns();
         HideLeaderboardPanel();
+        if (sessionSummaryPanel != null) sessionSummaryPanel.SetActive(false);
+        
         awaitingNameEntry = false;
-        pendingStreak = 0;
-
         correctAnswers = 0;
         incorrectAnswers = 0;
         currentStreak = 0;
+        maxStreakThisSession = 0;
+        maxStreakTime = 0f;
+        currentMultiplier = 1.0f;
+        sessionComboScore = 0f;
+        consecutiveCorrect = 0;
+        consecutiveIncorrect = 0;
+
+        gameStartTime = Time.time;
+        streakStartTime = Time.time;
+
+        currentStreakLeaderboard = LoadLeaderboard(GetLeaderboardKey("Streak"));
+        currentComboLeaderboard = LoadLeaderboard(GetLeaderboardKey("Combo"));
+
+        isAdaptiveMode = (selectedDiff == Difficulty.Adaptive);
+        if (isAdaptiveMode)
+            currentAdaptiveDiff = Difficulty.Beginner;
+        else
+            currentDiff = selectedDiff;
+
+        if (playerProfile.lastSession == null)
+            playerProfile.lastSession = new SessionStats();
+        playerProfile.lastSession.achievementsUnlockedThisSession.Clear();
+
         UpdateScoreUI();
 
-        menuPanel.SetActive(false);
-        gamePanel.SetActive(true);
-        startButton.gameObject.SetActive(false);
+        if (menuPanel != null) menuPanel.SetActive(false);
+        if (gamePanel != null) gamePanel.SetActive(true);
+        if (startButton != null) startButton.gameObject.SetActive(false);
+        
         isGameActive = true;
-
         GenerateQuestion();
     }
 
     private void OnOperatorChanged(int newValue)
     {
         RefreshSettingsFromDropdowns();
-        if (isGameActive)
-            GenerateQuestion();
+        if (isGameActive) GenerateQuestion();
     }
 
     private void OnDifficultyChanged(int newValue)
     {
         RefreshSettingsFromDropdowns();
-        if (isGameActive)
-            GenerateQuestion();
+        if (isGameActive && !isAdaptiveMode) GenerateQuestion();
     }
 
     private T GetSelectedEnumValue<T>(TMP_Dropdown dropdown) where T : struct, System.Enum
     {
-        if (dropdown.options != null && dropdown.options.Count > dropdown.value)
+        if (dropdown != null && dropdown.options != null && dropdown.options.Count > dropdown.value)
         {
             var label = dropdown.options[dropdown.value].text;
             if (!string.IsNullOrEmpty(label) && System.Enum.TryParse(label, out T result))
                 return result;
         }
-
-        return (T)System.Enum.ToObject(typeof(T), dropdown.value);
+        return default(T);
     }
 
     private void QuitGame()
@@ -167,8 +381,12 @@ public class MathGameManager : MonoBehaviour
     private void RefreshSettingsFromDropdowns()
     {
         currentOp = GetSelectedEnumValue<MathOperator>(operatorDropdown);
-        currentDiff = GetSelectedEnumValue<Difficulty>(difficultyDropdown);
+        selectedDiff = GetSelectedEnumValue<Difficulty>(difficultyDropdown);
     }
+
+    #endregion
+
+    #region Question Generation
 
     private void NextQuestion()
     {
@@ -179,30 +397,32 @@ public class MathGameManager : MonoBehaviour
     private void GenerateQuestion()
     {
         RefreshSettingsFromDropdowns();
+        Difficulty diffToUse = isAdaptiveMode ? currentAdaptiveDiff : selectedDiff;
 
-        feedbackText.text = "";
-        answerInputField.text = "";
-        answerInputField.interactable = true;
-        checkAnswerButton.gameObject.SetActive(true);
-        nextQuestionButton.gameObject.SetActive(false);
+        if (feedbackText != null) feedbackText.text = "";
+        if (answerInputField != null)
+        {
+            answerInputField.text = "";
+            answerInputField.interactable = true;
+        }
+        if (checkAnswerButton != null) checkAnswerButton.gameObject.SetActive(true);
+        if (nextQuestionButton != null) nextQuestionButton.gameObject.SetActive(false);
 
-        int num1 = 0;
-        int num2 = 0;
-
+        int num1 = 0, num2 = 0;
         int min1 = 1, max1 = 9;
         int min2 = 1, max2 = 9;
 
-        switch (currentDiff)
+        switch (diffToUse)
         {
             case Difficulty.Beginner:
                 min1 = 1; max1 = 9;
                 min2 = 1; max2 = 9;
                 break;
-            case Difficulty.Intermediate: // Mix of single and double digits
+            case Difficulty.Intermediate:
                 min1 = 1; max1 = 9;
                 min2 = 10; max2 = 99;
                 break;
-            case Difficulty.Difficult: // Double digits
+            case Difficulty.Difficult:
                 min1 = 10; max1 = 99;
                 min2 = 10; max2 = 99;
                 break;
@@ -211,9 +431,7 @@ public class MathGameManager : MonoBehaviour
         num1 = Random.Range(min1, max1 + 1);
         num2 = Random.Range(min2, max2 + 1);
 
-        // For Intermediate difficulty, randomly swap operands so either
-        // the first or second number can be the single-digit value.
-        if (currentDiff == Difficulty.Intermediate && Random.value < 0.5f)
+        if (diffToUse == Difficulty.Intermediate && Random.value < 0.5f)
         {
             int temp = num1;
             num1 = num2;
@@ -221,8 +439,18 @@ public class MathGameManager : MonoBehaviour
         }
 
         string opSymbol = "+";
+        MathOperator opToUse = currentOp;
 
-        switch (currentOp)
+        if (opToUse == MathOperator.Simple)
+        {
+            opToUse = Random.value < 0.5f ? MathOperator.Addition : MathOperator.Subtraction;
+        }
+        else if (opToUse == MathOperator.Advanced)
+        {
+            opToUse = (MathOperator)Random.Range(0, 4); // 0=Add, 1=Sub, 2=Mul, 3=Div
+        }
+
+        switch (opToUse)
         {
             case MathOperator.Addition:
                 opSymbol = "+";
@@ -230,7 +458,6 @@ public class MathGameManager : MonoBehaviour
                 break;
             case MathOperator.Subtraction:
                 opSymbol = "-";
-                // Ensure positive result to avoid negative numbers for beginners
                 if (num1 < num2)
                 {
                     int temp = num1;
@@ -245,36 +472,301 @@ public class MathGameManager : MonoBehaviour
                 break;
             case MathOperator.Division:
                 opSymbol = "÷";
-                // Ensure clean division by multiplying first
-                currentAnswer = num1; // This is the resulting answer
-                num1 = currentAnswer * num2; // The dividend
+                currentAnswer = num1;
+                num1 = currentAnswer * num2;
                 break;
         }
 
-        questionText.text = $"{num1} {opSymbol} {num2} =";
-
+        if (questionText != null) questionText.text = $"{num1} {opSymbol} {num2} =";
         StartCoroutine(FocusInputField());
     }
 
-    #region Leaderboard
-
-    [System.Serializable]
-    private class LeaderboardEntry
+    private IEnumerator FocusInputField()
     {
-        public string name;
-        public int streak;
+        yield return null;
+        if (answerInputField != null)
+        {
+            answerInputField.Select();
+            answerInputField.ActivateInputField();
+        }
     }
 
-    [System.Serializable]
-    private class LeaderboardData
+    #endregion
+
+    #region Gameplay Logic (Answers, Achievements, Adaptive)
+
+    public void CheckAnswer()
     {
-        public LeaderboardEntry[] entries;
+        if (answerInputField == null || string.IsNullOrEmpty(answerInputField.text)) return;
+
+        if (int.TryParse(answerInputField.text, out int userAnswer))
+        {
+            answerInputField.interactable = false;
+            if (checkAnswerButton != null) checkAnswerButton.gameObject.SetActive(false);
+            if (nextQuestionButton != null) nextQuestionButton.gameObject.SetActive(true);
+
+            if (userAnswer == currentAnswer)
+            {
+                HandleCorrectAnswer();
+            }
+            else
+            {
+                HandleIncorrectAnswer();
+            }
+
+            playerProfile.totalQuestionsAnswered++;
+            SavePlayerProfile();
+
+            UpdateScoreUI();
+            EvaluateAchievements();
+
+            if (nextQuestionButton != null) nextQuestionButton.Select();
+        }
     }
 
-    private List<LeaderboardEntry> LoadLeaderboard()
+    private void HandleCorrectAnswer()
+    {
+        correctAnswers++;
+        currentStreak++;
+        
+        float currentStreakTime = Time.time - streakStartTime;
+        if (currentStreak > maxStreakThisSession)
+        {
+            maxStreakThisSession = currentStreak;
+            maxStreakTime = currentStreakTime;
+        }
+        else if (currentStreak == maxStreakThisSession)
+        {
+            if (currentStreakTime < maxStreakTime || maxStreakTime == 0f)
+                maxStreakTime = currentStreakTime;
+        }
+
+        consecutiveCorrect++;
+        consecutiveIncorrect = 0;
+
+        float pointsEarned = BasePointsPerQuestion * currentMultiplier;
+        sessionComboScore += pointsEarned;
+        
+        // Increase multiplier (e.g. +0.5x per correct)
+        currentMultiplier += 0.5f;
+
+        if (feedbackText != null) feedbackText.text = "<color=green>Correct!</color>";
+        PlaySound("Correct");
+
+        if (currentStreak >= 3)
+        {
+            ShowStreakMessage();
+        }
+
+        // Adaptive Difficulty Shift Up
+        if (isAdaptiveMode && consecutiveCorrect >= AdaptiveThresholdUp)
+        {
+            if (currentAdaptiveDiff == Difficulty.Beginner) 
+            {
+                currentAdaptiveDiff = Difficulty.Intermediate;
+                consecutiveCorrect = 0;
+                ShowFeedbackMessage("Flow Mode: Difficulty Increased to Intermediate!", Color.yellow);
+                PlaySound("Milestone");
+            }
+            else if (currentAdaptiveDiff == Difficulty.Intermediate)
+            {
+                currentAdaptiveDiff = Difficulty.Difficult;
+                consecutiveCorrect = 0;
+                ShowFeedbackMessage("Flow Mode: Difficulty Increased to Difficult!", Color.yellow);
+                PlaySound("Milestone");
+            }
+        }
+    }
+
+    private void HandleIncorrectAnswer()
+    {
+        incorrectAnswers++;
+        currentStreak = 0;
+        consecutiveIncorrect++;
+        consecutiveCorrect = 0;
+        currentMultiplier = 1.0f; // Reset multiplier
+        streakStartTime = Time.time; // Reset streak timer
+
+        if (feedbackText != null) feedbackText.text = $"<color=red>Incorrect.</color> Answer is {currentAnswer}.";
+        PlaySound("Incorrect");
+
+        // Adaptive Difficulty Shift Down
+        if (isAdaptiveMode && consecutiveIncorrect >= AdaptiveThresholdDown)
+        {
+            if (currentAdaptiveDiff == Difficulty.Difficult) 
+            {
+                currentAdaptiveDiff = Difficulty.Intermediate;
+                consecutiveIncorrect = 0;
+                ShowFeedbackMessage("Flow Mode: Difficulty Decreased to Intermediate.", Color.cyan);
+            }
+            else if (currentAdaptiveDiff == Difficulty.Intermediate)
+            {
+                currentAdaptiveDiff = Difficulty.Beginner;
+                consecutiveIncorrect = 0;
+                ShowFeedbackMessage("Flow Mode: Difficulty Decreased to Beginner.", Color.cyan);
+            }
+        }
+    }
+
+    private void EvaluateAchievements()
+    {
+        float streakTime = Time.time - streakStartTime;
+        
+        UnlockAchievementIf("first_3_streak", currentStreak >= 3);
+        UnlockAchievementIf("10_streak", currentStreak >= 10);
+        UnlockAchievementIf("20_streak", currentStreak >= 20);
+        UnlockAchievementIf("50_streak", currentStreak >= 50);
+        
+        UnlockAchievementIf("lightning_3", currentStreak >= 3 && streakTime < 15f);
+        UnlockAchievementIf("speedrun_3", currentStreak >= 3 && streakTime < 10f);
+
+        if (currentStreak >= 10 && currentDiff == Difficulty.Difficult)
+            UnlockAchievementIf("difficult_master", true);
+
+        if (consecutiveCorrect >= 10)
+            UnlockAchievementIf("perfect_session", true);
+
+        if (currentMultiplier >= 4.0f)
+            UnlockAchievementIf("combo_master", true);
+    }
+
+    private void UnlockAchievementIf(string id, bool condition)
+    {
+        if (!condition) return;
+
+        var ach = playerProfile.achievements.FirstOrDefault(a => a.id == id);
+        if (ach != null && !ach.unlocked)
+        {
+            ach.unlocked = true;
+            ach.unlockedDate = System.DateTime.Now;
+            playerProfile.lastSession.achievementsUnlockedThisSession.Add(ach.name);
+            SavePlayerProfile();
+            ShowAchievementNotification(ach);
+        }
+    }
+
+    private void ShowAchievementNotification(Achievement ach)
+    {
+        PlaySound("Achievement");
+        if (achievementNotificationPanel != null && achievementNotificationText != null)
+        {
+            achievementNotificationText.text = $"Achievement Unlocked:\n<b>{ach.name}</b>\n<size=80%>{ach.description}</size>";
+            StartCoroutine(ShowNotificationCoroutine(achievementNotificationPanel, 3f));
+        }
+    }
+
+    private IEnumerator ShowNotificationCoroutine(GameObject panel, float duration)
+    {
+        panel.SetActive(true);
+        yield return new WaitForSeconds(duration);
+        panel.SetActive(false);
+    }
+
+    private void UpdateScoreUI()
+    {
+        if (scoreText != null) 
+        {
+            scoreText.text = $"<color=#4CAF50>{correctAnswers}</color> - <color=#F44336>{incorrectAnswers}</color>";
+        }
+        
+        if (totalPointsText != null)
+        {
+            totalPointsText.text = $"<b><color=#FFD700>{Mathf.FloorToInt(sessionComboScore)} pts</color></b>";
+        }
+        if (streakText != null) streakText.text = $"Streak: {currentStreak}";
+        
+        if (multiplierText != null) multiplierText.text = $"Multiplier: {currentMultiplier:F1}x";
+
+        if (nextMilestoneText != null)
+        {
+            int nextMilestone = ((currentStreak / 5) + 1) * 5;
+            if (currentStreak < 3) nextMilestone = 3;
+            int remaining = nextMilestone - currentStreak;
+            nextMilestoneText.text = $"{remaining} to next milestone!";
+        }
+
+        if (rankText != null)
+        {
+            string rankMsg = "";
+            int streakRank = GetRank(currentStreakLeaderboard, currentStreak, true);
+            int comboRank = GetRank(currentComboLeaderboard, sessionComboScore, false);
+
+            if (streakRank <= 10 && comboRank <= 10)
+                rankMsg = $"Streak Rank: #{streakRank} | Combo Rank: #{comboRank}";
+            else if (streakRank <= 10)
+                rankMsg = $"Streak Rank: #{streakRank}";
+            else if (comboRank <= 10)
+                rankMsg = $"Combo Rank: #{comboRank}";
+            else
+                rankMsg = "Unranked";
+
+            rankText.text = rankMsg;
+        }
+    }
+
+    private int GetRank(List<LeaderboardEntry> lb, float currentScore, bool isStreak)
+    {
+        if (lb == null) return 11;
+        int rank = 1;
+        foreach (var entry in lb)
+        {
+            float entryScore = isStreak ? entry.streak : entry.comboScore;
+            if (currentScore >= entryScore) break;
+            rank++;
+        }
+        return rank;
+    }
+
+    private void ShowStreakMessage()
+    {
+        if (streakMessageObj == null || streakMessageText == null) return;
+        string msg = encouragementMessages[Random.Range(0, encouragementMessages.Length)];
+        streakMessageText.text = msg;
+        StartCoroutine(AnimateMessage(streakMessageObj));
+    }
+
+    private void ShowFeedbackMessage(string msg, Color color)
+    {
+        if (streakMessageObj == null || streakMessageText == null) return;
+        streakMessageText.text = $"<color=#{ColorUtility.ToHtmlStringRGBA(color)}>{msg}</color>";
+        StartCoroutine(AnimateMessage(streakMessageObj));
+    }
+
+    private IEnumerator AnimateMessage(GameObject obj)
+    {
+        obj.SetActive(true);
+        float timer = 0;
+        while (timer < 2f)
+        {
+            float scale = Mathf.PingPong(Time.time * 3, 0.3f) + 1f;
+            obj.transform.localScale = new Vector3(scale, scale, 1);
+            timer += Time.deltaTime;
+            yield return null;
+        }
+        obj.SetActive(false);
+    }
+
+    private void PlaySound(string soundType)
+    {
+        // Placeholder for future audio implementation
+        Debug.Log($"[Audio Hook] PlaySound: {soundType}");
+    }
+
+    #endregion
+
+    #region Session Summary & Leaderboard
+
+    private string GetLeaderboardKey(string metric)
+    {
+        string diffStr = isAdaptiveMode ? "Adaptive" : selectedDiff.ToString();
+        string opStr = currentOp.ToString();
+        return $"LB_{metric}_{diffStr}_{opStr}";
+    }
+
+    private List<LeaderboardEntry> LoadLeaderboard(string key)
     {
         var list = new List<LeaderboardEntry>();
-        string json = PlayerPrefs.GetString(LeaderboardPrefsKey, "");
+        string json = PlayerPrefs.GetString(key, "");
         if (string.IsNullOrEmpty(json)) return list;
 
         try
@@ -288,46 +780,118 @@ public class MathGameManager : MonoBehaviour
         return list;
     }
 
-    private void SaveLeaderboard(List<LeaderboardEntry> list)
+    private void SaveLeaderboard(string key, List<LeaderboardEntry> list)
     {
-        var data = new LeaderboardData();
-        data.entries = list.ToArray();
+        var data = new LeaderboardData { entries = list.ToArray() };
         string json = JsonUtility.ToJson(data);
-        PlayerPrefs.SetString(LeaderboardPrefsKey, json);
+        PlayerPrefs.SetString(key, json);
         PlayerPrefs.Save();
     }
 
-    private bool QualifiesForLeaderboard(int streak)
+    private bool QualifiesForLeaderboard(int streak, float comboScore)
     {
-        var list = LoadLeaderboard();
-        if (list.Count < 10) return true;
-        int min = int.MaxValue;
-        foreach (var e in list) if (e.streak < min) min = e.streak;
-        return streak > min;
+        string streakKey = GetLeaderboardKey("Streak");
+        string comboKey = GetLeaderboardKey("Combo");
+
+        var streakList = LoadLeaderboard(streakKey);
+        var comboList = LoadLeaderboard(comboKey);
+
+        bool qualifiesStreak = streakList.Count < 10 || streak > streakList.Min(e => e.streak);
+        bool qualifiesCombo = comboList.Count < 10 || comboScore > comboList.Min(e => e.comboScore);
+
+        return qualifiesStreak || qualifiesCombo;
     }
 
-    private void AddToLeaderboard(string name, int streak)
+    private void AddToLeaderboards(string name)
     {
-        var list = LoadLeaderboard();
-        var entry = new LeaderboardEntry { name = string.IsNullOrEmpty(name) ? "Anonymous" : name, streak = streak };
-        list.Add(entry);
-        list.Sort((a, b) => b.streak.CompareTo(a.streak));
-        if (list.Count > 10) list.RemoveRange(10, list.Count - 10);
-        SaveLeaderboard(list);
-        UpdateLeaderboardUI(list);
+        string finalName = string.IsNullOrEmpty(name) ? "Anonymous" : name;
+        
+        string streakKey = GetLeaderboardKey("Streak");
+        var streakList = LoadLeaderboard(streakKey);
+        streakList.Add(new LeaderboardEntry { name = finalName, streak = maxStreakThisSession, comboScore = sessionComboScore, timeToMilestoneSeconds = maxStreakTime, timestamp = System.DateTime.Now.Ticks });
+        streakList.Sort((a, b) => {
+            int streakCompare = b.streak.CompareTo(a.streak);
+            if (streakCompare == 0) return a.timeToMilestoneSeconds.CompareTo(b.timeToMilestoneSeconds);
+            return streakCompare;
+        });
+        if (streakList.Count > 10) streakList.RemoveRange(10, streakList.Count - 10);
+        SaveLeaderboard(streakKey, streakList);
+
+        string comboKey = GetLeaderboardKey("Combo");
+        var comboList = LoadLeaderboard(comboKey);
+        comboList.Add(new LeaderboardEntry { name = finalName, streak = maxStreakThisSession, comboScore = sessionComboScore, timeToMilestoneSeconds = maxStreakTime, timestamp = System.DateTime.Now.Ticks });
+        comboList.Sort((a, b) => b.comboScore.CompareTo(a.comboScore));
+        if (comboList.Count > 10) comboList.RemoveRange(10, comboList.Count - 10);
+        SaveLeaderboard(comboKey, comboList);
     }
 
-    private void UpdateLeaderboardUI(List<LeaderboardEntry> list = null)
+    public void EndGame()
     {
-        if (leaderboardText == null) return;
-        if (list == null) list = LoadLeaderboard();
-        System.Text.StringBuilder sb = new System.Text.StringBuilder();
-        for (int i = 0; i < list.Count; i++)
+        isGameActive = false;
+        float sessionDuration = Time.time - gameStartTime;
+
+        if (gamePanel != null) gamePanel.SetActive(false);
+        if (answerInputField != null) answerInputField.interactable = false;
+
+        playerProfile.lastSession = new SessionStats
         {
-            var e = list[i];
-            sb.AppendLine($"{i + 1}. {e.name} - {e.streak}");
+            correctAnswers = correctAnswers,
+            incorrectAnswers = incorrectAnswers,
+            maxStreak = maxStreakThisSession,
+            maxComboScore = sessionComboScore,
+            sessionDurationSeconds = sessionDuration,
+            operatorUsed = (int)currentOp,
+            difficultyUsed = (int)(isAdaptiveMode ? Difficulty.Adaptive : selectedDiff),
+            achievementsUnlockedThisSession = playerProfile.lastSession.achievementsUnlockedThisSession
+        };
+        playerProfile.totalGamesPlayed++;
+        SavePlayerProfile();
+
+        if (QualifiesForLeaderboard(maxStreakThisSession, sessionComboScore) && maxStreakThisSession > 0)
+        {
+            awaitingNameEntry = true;
         }
-        leaderboardText.text = sb.ToString();
+
+        ShowSessionSummary();
+    }
+
+    private void ShowSessionSummary()
+    {
+        if (sessionSummaryPanel != null && sessionSummaryText != null)
+        {
+            sessionSummaryPanel.SetActive(true);
+            
+            string achText = playerProfile.lastSession.achievementsUnlockedThisSession.Count > 0 
+                ? $"\nAchievements Unlocked: {string.Join(", ", playerProfile.lastSession.achievementsUnlockedThisSession)}" 
+                : "";
+                
+            sessionSummaryText.text = $"<b>Session Summary</b>\n\n" +
+                                      $"Correct: {correctAnswers}\n" +
+                                      $"Max Streak: {maxStreakThisSession}\n" +
+                                      $"Combo Score: {sessionComboScore}\n" +
+                                      achText;
+        }
+        else
+        {
+            ProceedToLeaderboard();
+        }
+    }
+
+    public void ProceedToLeaderboard()
+    {
+        if (sessionSummaryPanel != null) sessionSummaryPanel.SetActive(false);
+        ShowLeaderboardPanel(awaitingNameEntry);
+    }
+
+    // Public wrapper methods so buttons can be wired as persistent listeners
+    public void ShowLeaderboard()
+    {
+        ShowLeaderboardPanel(false);
+    }
+
+    public void ShowLeaderboardWithNameEntry()
+    {
+        ShowLeaderboardPanel(true);
     }
 
     private void ShowLeaderboardPanel(bool showNameEntry)
@@ -347,64 +911,53 @@ public class MathGameManager : MonoBehaviour
             }
         }
 
-        if (submitNameButton != null)
-            submitNameButton.gameObject.SetActive(showNameEntry);
-
-        if (continueButton != null)
-            continueButton.gameObject.SetActive(!showNameEntry);
-
-        if (exitGameButton != null)
-            exitGameButton.gameObject.SetActive(!showNameEntry);
+        if (submitNameButton != null) submitNameButton.gameObject.SetActive(showNameEntry);
+        if (continueButton != null) continueButton.gameObject.SetActive(!showNameEntry);
+        if (exitGameButton != null) exitGameButton.gameObject.SetActive(!showNameEntry);
     }
 
     private void HideLeaderboardPanel()
     {
-        if (leaderboardPanel == null) return;
-        leaderboardPanel.SetActive(false);
+        if (leaderboardPanel != null) leaderboardPanel.SetActive(false);
     }
 
-    private void OnSubmitName()
+    private void UpdateLeaderboardUI()
     {
-        if (!awaitingNameEntry) return;
-        string name = nameEntryInput != null ? nameEntryInput.text : "";
-        AddToLeaderboard(name, pendingStreak);
-        awaitingNameEntry = false;
-        pendingStreak = 0;
-        ShowLeaderboardPanel(false);
-    }
+        if (leaderboardText == null) return;
+        
+        string streakKey = GetLeaderboardKey("Streak");
+        var streakList = LoadLeaderboard(streakKey);
+        
+        string comboKey = GetLeaderboardKey("Combo");
+        var comboList = LoadLeaderboard(comboKey);
 
-    // Public wrapper methods so buttons can be wired as persistent listeners
-    public void ShowLeaderboard()
-    {
-        ShowLeaderboardPanel(false);
-    }
-
-    public void ShowLeaderboardWithNameEntry()
-    {
-        ShowLeaderboardPanel(true);
-    }
-
-    public void EndGame()
-    {
-        isGameActive = false;
-        if (gamePanel != null)
-            gamePanel.SetActive(false);
-        if (answerInputField != null)
-            answerInputField.interactable = false;
-
-        if (awaitingNameEntry)
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        
+        sb.AppendLine($"<b>--- Top Streaks ({(isAdaptiveMode ? "Adaptive" : selectedDiff.ToString())} {currentOp}) ---</b>");
+        for (int i = 0; i < streakList.Count; i++)
         {
-            ShowLeaderboardPanel(true);
+            string timeStr = streakList[i].timeToMilestoneSeconds > 0 ? $" <size=80%>({streakList[i].timeToMilestoneSeconds:F1}s)</size>" : "";
+            sb.AppendLine($"{i + 1}. {streakList[i].name} - Streak: {streakList[i].streak}{timeStr}");
         }
-        else
+        
+        sb.AppendLine($"\n<b>--- Top Combo Scores ({(isAdaptiveMode ? "Adaptive" : selectedDiff.ToString())} {currentOp}) ---</b>");
+        for (int i = 0; i < comboList.Count; i++)
         {
-            ShowLeaderboardPanel(false);
+            sb.AppendLine($"{i + 1}. {comboList[i].name} - Pts: {comboList[i].comboScore}");
         }
+
+        leaderboardText.text = sb.ToString();
     }
 
     public void SubmitNameFromButton()
     {
-        OnSubmitName();
+        if (!awaitingNameEntry) return;
+        string name = nameEntryInput != null ? nameEntryInput.text : "";
+        AddToLeaderboards(name);
+        awaitingNameEntry = false;
+        
+        UpdateLeaderboardUI();
+        ShowLeaderboardPanel(false);
     }
 
     public void ContinueFromLeaderboard()
@@ -419,84 +972,4 @@ public class MathGameManager : MonoBehaviour
     }
 
     #endregion
-
-    private IEnumerator FocusInputField()
-    {
-        yield return null;
-        answerInputField.Select();
-        answerInputField.ActivateInputField();
-    }
-
-    public void CheckAnswer()
-    {
-        if (string.IsNullOrEmpty(answerInputField.text)) return;
-
-        int userAnswer;
-        if (int.TryParse(answerInputField.text, out userAnswer))
-        {
-            answerInputField.interactable = false;
-            checkAnswerButton.gameObject.SetActive(false);
-            nextQuestionButton.gameObject.SetActive(true);
-
-            if (userAnswer == currentAnswer)
-            {
-                correctAnswers++;
-                currentStreak++;
-                feedbackText.text = "<color=green>Correct!</color>";
-
-                // If this streak qualifies for the leaderboard, track it and flag for name entry.
-                if (QualifiesForLeaderboard(currentStreak))
-                {
-                    pendingStreak = currentStreak;
-                    if (!awaitingNameEntry)
-                        awaitingNameEntry = true;
-                }
-
-                if (currentStreak >= 3)
-                {
-                    ShowStreakMessage();
-                }
-            }
-            else
-            {
-                incorrectAnswers++;
-                currentStreak = 0;
-                feedbackText.text = $"<color=red>Incorrect.</color> Answer is {currentAnswer}.";
-            }
-
-            UpdateScoreUI();
-
-            // On iOS, focus the Next button so the keyboard can briefly dismiss, 
-            // or the user can tap next question easily
-            nextQuestionButton.Select();
-        }
-    }
-
-    private void UpdateScoreUI()
-    {
-        scoreText.text = $"Score: <color=green>{correctAnswers}</color> - <color=red>{incorrectAnswers}</color>";
-        streakText.text = $"Streak: {currentStreak}";
-    }
-
-    private void ShowStreakMessage()
-    {
-        string msg = encouragementMessages[Random.Range(0, encouragementMessages.Length)];
-        streakMessageText.text = msg;
-        StartCoroutine(AnimateStreakMessage());
-    }
-
-    private IEnumerator AnimateStreakMessage()
-    {
-        streakMessageObj.SetActive(true);
-        float timer = 0;
-        // Simple pulsing animation
-        while (timer < 2f)
-        {
-            float scale = Mathf.PingPong(Time.time * 3, 0.3f) + 1f;
-            streakMessageObj.transform.localScale = new Vector3(scale, scale, 1);
-            timer += Time.deltaTime;
-            yield return null;
-        }
-        streakMessageObj.SetActive(false);
-    }
 }
