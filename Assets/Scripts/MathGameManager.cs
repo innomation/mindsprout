@@ -39,8 +39,7 @@ public class MathGameManager : MonoBehaviour
     public TextMeshProUGUI feedbackText;
 
     [Header("Game Enhancement UI (Optional)")]
-    public TextMeshProUGUI multiplierText;
-    public TextMeshProUGUI rankText;
+    public Slider comboBar;
     public TextMeshProUGUI nextMilestoneText;
     public GameObject sessionSummaryPanel;
     public TextMeshProUGUI sessionSummaryText;
@@ -297,6 +296,7 @@ public class MathGameManager : MonoBehaviour
         if (statsPanel != null) statsPanel.SetActive(false);
         if (startButton != null) startButton.gameObject.SetActive(true);
         if (streakMessageObj != null) streakMessageObj.SetActive(false);
+        if (comboBar != null) comboBar.gameObject.SetActive(false);
         
         HideLeaderboardPanel();
         isGameActive = false;
@@ -341,6 +341,7 @@ public class MathGameManager : MonoBehaviour
         if (menuPanel != null) menuPanel.SetActive(false);
         if (gamePanel != null) gamePanel.SetActive(true);
         if (startButton != null) startButton.gameObject.SetActive(false);
+        if (comboBar != null) comboBar.gameObject.SetActive(true);
         
         isGameActive = true;
         GenerateQuestion();
@@ -671,36 +672,24 @@ public class MathGameManager : MonoBehaviour
         
         if (totalPointsText != null)
         {
-            totalPointsText.text = $"<b><color=#FFD700>{Mathf.FloorToInt(sessionComboScore)} pts</color></b>";
+            totalPointsText.text = $"⭐ {Mathf.FloorToInt(sessionComboScore)}";
         }
-        if (streakText != null) streakText.text = $"Streak: {currentStreak}";
+        if (streakText != null) streakText.text = $"🔥 {currentStreak}";
         
-        if (multiplierText != null) multiplierText.text = $"Multiplier: {currentMultiplier:F1}x";
-
         if (nextMilestoneText != null)
         {
             int nextMilestone = ((currentStreak / 5) + 1) * 5;
             if (currentStreak < 3) nextMilestone = 3;
             int remaining = nextMilestone - currentStreak;
             nextMilestoneText.text = $"{remaining} to next milestone!";
-        }
-
-        if (rankText != null)
-        {
-            string rankMsg = "";
-            int streakRank = GetRank(currentStreakLeaderboard, currentStreak, true);
-            int comboRank = GetRank(currentComboLeaderboard, sessionComboScore, false);
-
-            if (streakRank <= 10 && comboRank <= 10)
-                rankMsg = $"Streak Rank: #{streakRank} | Combo Rank: #{comboRank}";
-            else if (streakRank <= 10)
-                rankMsg = $"Streak Rank: #{streakRank}";
-            else if (comboRank <= 10)
-                rankMsg = $"Combo Rank: #{comboRank}";
-            else
-                rankMsg = "Unranked";
-
-            rankText.text = rankMsg;
+            
+            if (comboBar != null)
+            {
+                int prevMilestone = nextMilestone == 3 ? 0 : nextMilestone - 5;
+                comboBar.minValue = prevMilestone;
+                comboBar.maxValue = nextMilestone;
+                comboBar.value = currentStreak;
+            }
         }
     }
 
@@ -831,6 +820,7 @@ public class MathGameManager : MonoBehaviour
         float sessionDuration = Time.time - gameStartTime;
 
         if (gamePanel != null) gamePanel.SetActive(false);
+        if (comboBar != null) comboBar.gameObject.SetActive(false);
         if (answerInputField != null) answerInputField.interactable = false;
 
         playerProfile.lastSession = new SessionStats
